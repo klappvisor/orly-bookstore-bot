@@ -24,6 +24,7 @@ import qualified Data.Text as T
 import Network.HTTP.Client (newManager, Manager)
 import Network.HTTP.Client.TLS  (tlsManagerSettings)
 import Data.Maybe
+import Data.Monoid
 import Web.Telegram.API.Bot
 import System.Environment
 import qualified Paths_orly_bookstore_bot as P
@@ -56,7 +57,7 @@ startApp = do
   let telegramToken' = fromJust $ lookup "TELEGRAM_TOKEN" env
       paymentsToken' = fromJust $ lookup "PAYMENTS_TOKEN" env
       config = BotConfig
-        { telegramToken = Token $ T.pack telegramToken'
+        { telegramToken = Token $ T.pack $ "bot" <> telegramToken'
         , paymentsToken = T.pack paymentsToken'
         , manager = manager'
         }
@@ -95,20 +96,46 @@ handleMessage msg = do
     BotConfig{..} <- ask
     let chatId = ChatId $ fromIntegral $ user_id $ fromJust $ from msg
         messageText = text msg
-        onCommand (Just (T.stripPrefix "/help" -> Just _)) = sendMessageM $ helpMessage chatId
-        onCommand (Just (T.stripPrefix "/books" -> Just _)) = sendMessageM $ helpMessage chatId
+        sendInvoices books = mapM_ sendInvoiceM $ map (buildBuyBookInvoice chatId paymentsToken) books
+        byTitle title book = T.isInfixOf title $ fst book
+        onCommand (Just (T.stripPrefix "/help" -> Just _)) = sendMessageM (helpMessage chatId) >> return ()
+        onCommand (Just (T.stripPrefix "/books" -> Just _)) = sendInvoices allBooks
+        onCommand (Just (T.stripPrefix "/find " -> Just title)) = sendInvoices $ filter (byTitle title) allBooks
     liftIO $ runClient (onCommand messageText) telegramToken manager
     return ()
 
+allBooks :: [(Text, (Text, Text, Int))]
 allBooks =
-  [ ("Title 1", ("image", 1000))
-  , ("Title 2", ("image", 2500))
-  , ("Title 3", ("image", 5200))
+  [ ("Copying and Pasting from Stack Overflow",
+        ("http://i.imgur.com/fawRchq.jpg", "Cutting corners to meet arbitrary management deadlines", 7000))
+  , ("Googling the Error Message",
+        ("http://i.imgur.com/fhgzVEt.jpg", "The internet will make those bad words go away", 4500))
+  , ("Whiteboard Interviews",
+        ("http://i.imgur.com/oM9yCym.png", "Putting the candidate through the same bullshit you went through", 3200))
+  , ("\"Temporary\" Workaround",
+        ("http://i.imgur.com/IQBhKkT.jpg", "Who are you kidding?", 4200))
   ]
 
+buildBuyBookInvoice (ChatId chatId) token (title, (image, description, price)) =
+    (sendInvoiceRequest chatId title description payload token link code prices)
+        { snd_inv_photo_url = Just image
+        , snd_inv_photo_width = Just 1024
+        , snd_inv_photo_height = Just 1344
+        }
+        where code = CurrencyCode "USD"
+              payload = "book_payment_payload"
+              link = "deep_link"
+              prices =
+                [ LabeledPrice title price
+                , LabeledPrice "Donation to kitten hospital" 300
+                , LabeledPrice "Discount for donation" (-300)
+                ]
+
+
 helpMessage userId = sendMessageRequest userId $ T.unlines
-    [ "/help - show this message",
-      "/books - show list of books"
+    [ "/help - show this message"
+    , "/books - show list of all books"
+    , "/find title - find book by title"
     ]
 
 newtype Bot a = Bot
