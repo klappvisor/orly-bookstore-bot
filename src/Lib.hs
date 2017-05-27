@@ -1,10 +1,11 @@
 {-# LANGUAGE DataKinds       #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators   #-}
 {-# LANGUAGE DeriveGeneric   #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Lib
     ( startApp
@@ -12,14 +13,14 @@ module Lib
     ) where
 
 import Data.Aeson
-import Data.Aeson.TH
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Servant
-import GHC.Generics
+import GHC.Generics hiding (from)
 import Control.Monad.Reader
 import Control.Monad.Except
-import Data.Text
+import Data.Text (Text)
+import qualified Data.Text as T
 import Network.HTTP.Client (newManager, Manager)
 import Network.HTTP.Client.TLS  (tlsManagerSettings)
 import Data.Maybe
@@ -39,6 +40,10 @@ instance ToJSON Version
 -- that returns Version data record as JSON.
 -- Thanks to Generic and ToJSON deriving Servant knows how
 type BotAPI = "version" :> Get '[JSON] Version
+         :<|> "webhook"
+              :> Capture "secret" Text
+              :> ReqBody '[JSON] Update
+              :> Post '[JSON] ()
 
 botApi :: Proxy BotAPI
 botApi = Proxy
@@ -51,8 +56,8 @@ startApp = do
   let telegramToken' = fromJust $ lookup "TELEGRAM_TOKEN" env
       paymentsToken' = fromJust $ lookup "PAYMENTS_TOKEN" env
       config = BotConfig
-        { telegramToken = Token $ pack telegramToken'
-        , paymentsToken = pack paymentsToken'
+        { telegramToken = Token $ T.pack telegramToken'
+        , paymentsToken = T.pack paymentsToken'
         , manager = manager'
         }
   run 8080 $ app config
@@ -60,7 +65,6 @@ startApp = do
 app :: BotConfig -> Application
 app config = serve botApi $ initBotServer config
 
--- defined natural transformation from ServerT BotAPI Bot to Server BotAPI
 initBotServer :: BotConfig -> Server BotAPI
 initBotServer config = enter (transform config) botServer
     where transform :: BotConfig -> Bot :~> ExceptT ServantErr IO
@@ -68,11 +72,44 @@ initBotServer config = enter (transform config) botServer
 
 -- actual server implementation
 botServer :: ServerT BotAPI Bot
-botServer =
-  returnVersion
-    where version' = Version $ pack $ showVersion P.version
+botServer = returnVersion :<|> handleWebhook
+    where version' = Version $ T.pack $ showVersion P.version
           returnVersion :: Bot Version
           returnVersion = return version'
+          handleWebhook :: Text -> Update -> Bot ()
+          handleWebhook secret update = do
+              Token token <- asks telegramToken
+              if EQ == compare secret token
+                 then handleUpdate update
+                 else throwError err403
+
+handleUpdate :: Update -> Bot ()
+handleUpdate update = do
+    case update of
+        Update { message = Just msg } -> handleMessage msg
+--      Update { ... } more cases
+        _ -> liftIO $ putStrLn $ "Handle update failed." ++ show update
+
+handleMessage :: Message -> Bot ()
+handleMessage msg = do
+    BotConfig{..} <- ask
+    let chatId = ChatId $ fromIntegral $ user_id $ fromJust $ from msg
+        messageText = text msg
+        onCommand (Just (T.stripPrefix "/help" -> Just _)) = sendMessageM $ helpMessage chatId
+        onCommand (Just (T.stripPrefix "/books" -> Just _)) = sendMessageM $ helpMessage chatId
+    liftIO $ runClient (onCommand messageText) telegramToken manager
+    return ()
+
+allBooks =
+  [ ("Title 1", ("image", 1000))
+  , ("Title 2", ("image", 2500))
+  , ("Title 3", ("image", 5200))
+  ]
+
+helpMessage userId = sendMessageRequest userId $ T.unlines
+    [ "/help - show this message",
+      "/books - show list of books"
+    ]
 
 newtype Bot a = Bot
     { runBot :: ReaderT BotConfig Handler a
