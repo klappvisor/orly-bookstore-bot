@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeOperators   #-}
 {-# LANGUAGE DeriveGeneric   #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lib
@@ -20,15 +20,20 @@ import GHC.Generics
 import Control.Monad.Reader
 import Control.Monad.Except
 import Data.Text
-import Network.HTTP.Client (Manager)
+import Network.HTTP.Client (newManager, Manager)
+import Network.HTTP.Client.TLS  (tlsManagerSettings)
+import Data.Maybe
 import Web.Telegram.API.Bot
+import System.Environment
 import qualified Paths_orly_bookstore_bot as P
 import Data.Version (showVersion)
 
 -- We needed those language extensions to make it as simple as that
 data Version = Version
   { version :: Text
-  } deriving (Show, Generic, ToJSON)
+  } deriving (Show, Generic)
+
+instance ToJSON Version
 
 -- At the moment Bot API consists of only version resource
 -- that returns Version data record as JSON.
@@ -41,19 +46,34 @@ botApi = Proxy
 startApp :: IO ()
 startApp = do
   putStrLn "ORLY book store bot is starting..."
-  run 8080 app
+  env <- getEnvironment
+  manager' <- newManager tlsManagerSettings
+  let telegramToken' = fromJust $ lookup "TELEGRAM_TOKEN" env
+      paymentsToken' = fromJust $ lookup "PAYMENTS_TOKEN" env
+      config = BotConfig
+        { telegramToken = Token $ pack telegramToken'
+        , paymentsToken = pack paymentsToken'
+        , manager = manager'
+        }
+  run 8080 $ app config
 
-app :: Application
-app = serve botApi botServer
+app :: BotConfig -> Application
+app config = serve botApi $ initBotServer config
+
+-- defined natural transformation from ServerT BotAPI Bot to Server BotAPI
+initBotServer :: BotConfig -> Server BotAPI
+initBotServer config = enter (transform config) botServer
+    where transform :: BotConfig -> Bot :~> ExceptT ServantErr IO
+          transform config = Nat (flip runReaderT config . runBot)
 
 -- actual server implementation
-botServer :: Server BotAPI
+botServer :: ServerT BotAPI Bot
 botServer =
   returnVersion
     where version' = Version $ pack $ showVersion P.version
+          returnVersion :: Bot Version
           returnVersion = return version'
 
-{-
 newtype Bot a = Bot
     { runBot :: ReaderT BotConfig Handler a
     } deriving ( Functor, Applicative, Monad, MonadIO, -- classes from base and transformers
@@ -61,8 +81,7 @@ newtype Bot a = Bot
 
 data BotConfig = BotConfig
   { telegramToken :: Token
-  , paymentToken :: Text
+  , paymentsToken :: Text
   , manager :: Manager
   }
 
--}
