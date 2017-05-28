@@ -87,20 +87,22 @@ botServer = returnVersion :<|> handleWebhook
 handleUpdate :: Update -> Bot ()
 handleUpdate update = do
     case update of
-        Update { message = Just msg } -> handleMessage msg
+--      Update { message = Just msg } -> handleMessage msg
 --      Update { ... } more cases
-        _ -> liftIO $ putStrLn $ "Handle update failed." ++ show update
+        _ -> liftIO $ putStrLn $ "Handle update failed. " ++ show update
 
 handleMessage :: Message -> Bot ()
 handleMessage msg = do
     BotConfig{..} <- ask
     let chatId = ChatId $ fromIntegral $ user_id $ fromJust $ from msg
         messageText = text msg
+        sendHelpMessage = sendMessageM (helpMessage chatId) >> return ()
         sendInvoices books = mapM_ sendInvoiceM $ map (buildBuyBookInvoice chatId paymentsToken) books
-        byTitle title book = T.isInfixOf title $ fst book
-        onCommand (Just (T.stripPrefix "/help" -> Just _)) = sendMessageM (helpMessage chatId) >> return ()
+        byTitle title book = T.isInfixOf title $ fst book -- book title contains title
+        onCommand (Just (T.stripPrefix "/help" -> Just _)) = sendHelpMessage
         onCommand (Just (T.stripPrefix "/books" -> Just _)) = sendInvoices allBooks
         onCommand (Just (T.stripPrefix "/find " -> Just title)) = sendInvoices $ filter (byTitle title) allBooks
+        onCommand _ = sendHelpMessage
     liftIO $ runClient (onCommand messageText) telegramToken manager
     return ()
 
@@ -118,18 +120,13 @@ allBooks =
 
 buildBuyBookInvoice (ChatId chatId) token (title, (image, description, price)) =
     (sendInvoiceRequest chatId title description payload token link code prices)
-        { snd_inv_photo_url = Just image
-        , snd_inv_photo_width = Just 1024
-        , snd_inv_photo_height = Just 1344
-        }
+        { snd_inv_photo_url = Just image }
         where code = CurrencyCode "USD"
               payload = "book_payment_payload"
               link = "deep_link"
-              prices =
-                [ LabeledPrice title price
-                , LabeledPrice "Donation to kitten hospital" 300
-                , LabeledPrice "Discount for donation" (-300)
-                ]
+              prices = [ LabeledPrice title price
+                       , LabeledPrice "Donation to kitten hospital" 300
+                       , LabeledPrice "Discount for donation" (-300) ]
 
 
 helpMessage userId = sendMessageRequest userId $ T.unlines
