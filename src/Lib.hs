@@ -63,6 +63,17 @@ startApp = do
         }
   run 8080 $ app config
 
+newtype Bot a = Bot
+    { runBot :: ReaderT BotConfig Handler a
+    } deriving ( Functor, Applicative, Monad, MonadIO, -- classes from base and transformers
+                 MonadReader BotConfig, MonadError ServantErr) -- classes from mtl for
+
+data BotConfig = BotConfig
+  { telegramToken :: Token
+  , paymentsToken :: Text
+  , manager :: Manager
+  }
+
 app :: BotConfig -> Application
 app config = serve botApi $ initBotServer config
 
@@ -87,9 +98,18 @@ botServer = returnVersion :<|> handleWebhook
 handleUpdate :: Update -> Bot ()
 handleUpdate update = do
     case update of
---      Update { message = Just msg } -> handleMessage msg
+        Update { message = Just Message
+          { successful_payment = Just payment } } -> handleSuccessfulPayment payment
+        Update { message = Just msg } -> handleMessage msg
 --      Update { ... } more cases
+        Update { pre_checkout_query = Just query } -> handlePreCheckout query
         _ -> liftIO $ putStrLn $ "Handle update failed. " ++ show update
+
+helpMessage userId = sendMessageRequest userId $ T.unlines
+    [ "/help - show this message"
+    , "/books - show list of all books"
+    , "/find title - find book by title"
+    ]
 
 handleMessage :: Message -> Bot ()
 handleMessage msg = do
@@ -125,24 +145,22 @@ buildBuyBookInvoice (ChatId chatId) token (title, (image, description, price)) =
               payload = "book_payment_payload"
               link = "deep_link"
               prices = [ LabeledPrice title price
-                       , LabeledPrice "Donation to kitten hospital" 300
+                       , LabeledPrice "Donation to a kitten hospital" 300
                        , LabeledPrice "Discount for donation" (-300) ]
 
+handlePreCheckout :: PreCheckoutQuery -> Bot ()
+handlePreCheckout query = do
+    BotConfig{..} <- ask
+    let chatId = ChatId $ fromIntegral $ user_id $ pre_che_from query
+        queryId = pre_che_id query
+        okRequest = AnswerPreCheckoutQueryRequest queryId True Nothing
+    liftIO $ runClient (answerPreCheckoutQueryM okRequest) telegramToken manager
+    return ()
 
-helpMessage userId = sendMessageRequest userId $ T.unlines
-    [ "/help - show this message"
-    , "/books - show list of all books"
-    , "/find title - find book by title"
-    ]
-
-newtype Bot a = Bot
-    { runBot :: ReaderT BotConfig Handler a
-    } deriving ( Functor, Applicative, Monad, MonadIO, -- classes from base and transformers
-                 MonadReader BotConfig, MonadError ServantErr) -- classes from mtl for
-
-data BotConfig = BotConfig
-  { telegramToken :: Token
-  , paymentsToken :: Text
-  , manager :: Manager
-  }
+handleSuccessfulPayment :: SuccessfulPayment -> Bot ()
+handleSuccessfulPayment payment = do
+    let totalAmount = T.pack $ show $ (suc_pmnt_total_amount payment) `div` 100
+        CurrencyCode code = suc_pmnt_currency payment
+    liftIO $ print $ "We have earned " <> code <> totalAmount <> ". Shipping book to the client!"
+    return ()
 
